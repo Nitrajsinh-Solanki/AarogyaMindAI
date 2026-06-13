@@ -13,6 +13,11 @@ const GEMINI_CONFIG = {
   model: "gemini-1.5-flash",
 } as const;
 
+// Request timeout in milliseconds
+const REQUEST_TIMEOUT_MS = 15_000;
+// Maximum response size to read (bytes) — prevents response-flooding
+const MAX_RESPONSE_BYTES = 64 * 1024; // 64 KB
+
 // ─── Fallback Response ───────────────────────────────────────────────────────────
 
 const FALLBACK_RESPONSE = `Hey, I'm having a little trouble connecting right now, but I'm still here with you! 🌿
@@ -43,6 +48,51 @@ function toOpenAIMessages(
   return [systemMessage, ...chatMessages];
 }
 
+// ─── Fetch with Timeout ──────────────────────────────────────────────────────────
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ─── Safe Response Text Reader ───────────────────────────────────────────────────
+
+async function safeReadJson(response: Response): Promise<unknown> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    return response.json();
+  }
+  let totalBytes = 0;
+  const chunks: Uint8Array[] = [];
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    totalBytes += value.byteLength;
+    if (totalBytes > MAX_RESPONSE_BYTES) {
+      reader.cancel();
+      throw new Error("Response too large");
+    }
+    chunks.push(value);
+  }
+  const combined = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  const text = new TextDecoder().decode(combined);
+  return JSON.parse(text);
+}
+
 // ─── Groq Caller ─────────────────────────────────────────────────────────────────
 
 export async function callGroq(
@@ -50,29 +100,34 @@ export async function callGroq(
   systemPrompt: string
 ): Promise<string> {
   const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) throw new Error("GROQ_API_KEY is not set");
+  if (!apiKey) throw new Error("GROQ_API_KEY is not configured");
 
-  const response = await fetch(GROQ_CONFIG.endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
+  const response = await fetchWithTimeout(
+    GROQ_CONFIG.endpoint,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: GROQ_CONFIG.model,
+        messages: toOpenAIMessages(messages, systemPrompt),
+        max_tokens: 512,
+        temperature: 0.75,
+      }),
     },
-    body: JSON.stringify({
-      model: GROQ_CONFIG.model,
-      messages: toOpenAIMessages(messages, systemPrompt),
-      max_tokens: 512,
-      temperature: 0.75,
-    }),
-  });
+    REQUEST_TIMEOUT_MS
+  );
 
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Groq API error ${response.status}: ${errorText}`);
+    // Do NOT include response body in error — may contain key details
+    throw new Error(`Groq API error: HTTP ${response.status}`);
   }
 
-  const data = await response.json();
-  const content = data?.choices?.[0]?.message?.content;
+  const data = await safeReadJson(response);
+  const content = (data as { choices?: { message?: { content?: string } }[] })
+    ?.choices?.[0]?.message?.content;
   if (!content) throw new Error("Groq returned empty content");
   return content.trim();
 }
@@ -87,14 +142,15 @@ interface GeminiContent {
 function toGeminiMessages(
   messages: ChatMessage[],
   systemPrompt: string
-): { systemInstruction: { parts: { text: string }[] }; contents: GeminiContent[] } {
-  // Gemini uses systemInstruction separately
+): {
+  systemInstruction: { parts: { text: string }[] };
+  contents: GeminiContent[];
+} {
   const contents: GeminiContent[] = messages.map((m) => ({
     role: m.role === "assistant" ? "model" : "user",
     parts: [{ text: m.content }],
   }));
 
-  // Gemini requires alternating user/model turns — ensure it starts with user
   const validContents =
     contents.length > 0 && contents[0].role === "model"
       ? [{ role: "user" as const, parts: [{ text: "Hello" }] }, ...contents]
@@ -111,12 +167,16 @@ export async function callGemini(
   systemPrompt: string
 ): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error("GEMINI_API_KEY is not set");
+  if (!apiKey) throw new Error("GEMINI_API_KEY is not configured");
 
   const { systemInstruction, contents } = toGeminiMessages(messages, systemPrompt);
 
-  const response = await fetch(
-    `${GEMINI_CONFIG.endpoint}?key=${apiKey}`,
+  // Key is passed as query param — this is Gemini's required pattern (server-side only)
+  const url = new URL(GEMINI_CONFIG.endpoint);
+  url.searchParams.set("key", apiKey);
+
+  const response = await fetchWithTimeout(
+    url.toString(),
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -128,16 +188,20 @@ export async function callGemini(
           temperature: 0.75,
         },
       }),
-    }
+    },
+    REQUEST_TIMEOUT_MS
   );
 
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Gemini API error ${response.status}: ${errorText}`);
+    throw new Error(`Gemini API error: HTTP ${response.status}`);
   }
 
-  const data = await response.json();
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  const data = await safeReadJson(response);
+  const text = (
+    data as {
+      candidates?: { content?: { parts?: { text?: string }[] } }[];
+    }
+  )?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) throw new Error("Gemini returned empty content");
   return text.trim();
 }
@@ -153,7 +217,10 @@ export async function callAI(
     const result = await callGroq(messages, systemPrompt);
     return result;
   } catch (groqError) {
-    console.warn("[AarogyaMind] Groq failed, trying Gemini:", groqError);
+    console.warn(
+      "[AarogyaMind] Groq failed, trying Gemini:",
+      groqError instanceof Error ? groqError.message : "Unknown"
+    );
   }
 
   // 2. Fallback to Gemini
@@ -161,7 +228,10 @@ export async function callAI(
     const result = await callGemini(messages, systemPrompt);
     return result;
   } catch (geminiError) {
-    console.error("[AarogyaMind] Gemini also failed:", geminiError);
+    console.error(
+      "[AarogyaMind] Gemini also failed:",
+      geminiError instanceof Error ? geminiError.message : "Unknown"
+    );
   }
 
   // 3. Both failed — return hardcoded empathetic fallback
