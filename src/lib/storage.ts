@@ -71,8 +71,6 @@ function toRecord<T extends object>(value: T): Record<string, unknown> {
   return value as unknown as Record<string, unknown>;
 }
 
-// ─── Validators ──────────────────────────────────────────────────────────────────
-
 function isValidMoodEntry(entry: unknown): entry is MoodEntry {
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
   const e = entry as Record<string, unknown>;
@@ -258,6 +256,30 @@ export function saveChatMessage(message: ChatMessage): void {
   }
 
   safeSet(STORAGE_KEYS.CHAT_HISTORY, history);
+}
+
+/**
+ * Replaces the entire chat history with the provided array of messages.
+ * Each message is sanitized before storing. The array is capped at
+ * MAX_CHAT_MESSAGES (50) — the most recent messages are kept.
+ *
+ * This is used by chat/page.tsx which manages the full messages array
+ * in React state and persists the whole snapshot on every update.
+ */
+export function saveChatHistory(messages: ChatMessage[]): void {
+  if (!Array.isArray(messages)) return;
+
+  const sanitized = messages
+    .map((m) => sanitizeChatMessage(m))
+    .filter((m): m is ChatMessage => m !== null);
+
+  // Keep only the most recent MAX_CHAT_MESSAGES entries
+  const capped =
+    sanitized.length > MAX_CHAT_MESSAGES
+      ? sanitized.slice(sanitized.length - MAX_CHAT_MESSAGES)
+      : sanitized;
+
+  safeSet(STORAGE_KEYS.CHAT_HISTORY, capped);
 }
 
 export function clearChatHistory(): void {
