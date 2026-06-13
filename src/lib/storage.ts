@@ -62,6 +62,15 @@ function getYesterdayDateStr(): string {
   return d.toISOString().split("T")[0];
 }
 
+// ─── Type-safe conversion helper ────────────────────────────────────────────────
+// Use this whenever a strongly-typed object (MoodEntry, ChatMessage, etc.) needs
+// to be treated as a generic Record for storage/serialization. Going through
+// `unknown` first satisfies TS2352 because the source and target types don't
+// structurally overlap (no index signature on the source interfaces).
+function toRecord<T extends object>(value: T): Record<string, unknown> {
+  return value as unknown as Record<string, unknown>;
+}
+
 // ─── Validators ──────────────────────────────────────────────────────────────────
 
 function isValidMoodEntry(entry: unknown): entry is MoodEntry {
@@ -85,7 +94,7 @@ function isValidChatMessage(msg: unknown): msg is ChatMessage {
 
 function sanitizeMoodEntry(raw: unknown): MoodEntry | null {
   if (!isValidMoodEntry(raw)) return null;
-  const e = raw as Record<string, unknown>;
+  const e = raw as unknown as Record<string, unknown>;
   return {
     id: sanitizeString(e.id, 64) || `entry_${Date.now()}`,
     date: sanitizeString(e.date, 10),
@@ -94,10 +103,10 @@ function sanitizeMoodEntry(raw: unknown): MoodEntry | null {
     journalText: sanitizeString(e.journalText, MAX_JOURNAL_LENGTH),
     stressedSubjects: Array.isArray(e.stressedSubjects)
       ? e.stressedSubjects
-          .filter((s): s is string => typeof s === "string")
-          .map((s) => sanitizeString(s, MAX_SUBJECT_LENGTH))
-          .filter(Boolean)
-          .slice(0, 10)
+        .filter((s): s is string => typeof s === "string")
+        .map((s) => sanitizeString(s, MAX_SUBJECT_LENGTH))
+        .filter(Boolean)
+        .slice(0, 10)
       : [],
     createdAt:
       typeof e.createdAt === "string" ? sanitizeString(e.createdAt, 30) : new Date().toISOString(),
@@ -106,7 +115,7 @@ function sanitizeMoodEntry(raw: unknown): MoodEntry | null {
 
 function sanitizeChatMessage(raw: unknown): ChatMessage | null {
   if (!isValidChatMessage(raw)) return null;
-  const m = raw as Record<string, unknown>;
+  const m = raw as unknown as Record<string, unknown>;
   return {
     id: sanitizeString(m.id, 64) || `msg_${Date.now()}`,
     role: m.role as "user" | "assistant",
@@ -177,84 +186,92 @@ export function saveMoodEntry(entry: MoodEntry): void {
       entries.splice(0, entries.length - MAX_MOOD_ENTRIES);
     }
   }
+
   safeSet(STORAGE_KEYS.MOOD_ENTRIES, entries);
 }
 
 export function getMoodEntries(): MoodEntry[] {
   const raw = safeGet<unknown[]>(STORAGE_KEYS.MOOD_ENTRIES);
   if (!Array.isArray(raw)) return [];
-  return raw.map(sanitizeMoodEntry).filter((e): e is MoodEntry => e !== null);
+  return raw
+    .map((e) => sanitizeMoodEntry(e))
+    .filter((e): e is MoodEntry => e !== null);
 }
 
-export function getTodaysMoodEntry(): MoodEntry | null {
+export function getTodayEntry(): MoodEntry | null {
   const today = getTodayDateStr();
-  const entries = getMoodEntries();
-  return entries.find((e) => e.date === today) ?? null;
+  return getMoodEntries().find((e) => e.date === today) ?? null;
 }
 
-export function getLast7DaysEntries(): MoodEntry[] {
-  const entries = getMoodEntries();
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - 6);
-  const cutoffStr = cutoff.toISOString().split("T")[0];
-  return entries
-    .filter((e) => e.date >= cutoffStr)
-    .sort((a, b) => a.date.localeCompare(b.date));
+export function hasCheckedInToday(): boolean {
+  return getTodayEntry() !== null;
+}
+
+/**
+ * Returns a single mood entry as a plain serializable record
+ * (useful for export/debug tooling or analytics payloads).
+ */
+export function getMoodEntryAsRecord(date: string): Record<string, unknown> | null {
+  const entry = getMoodEntries().find((e) => e.date === date);
+  if (!entry) return null;
+  return toRecord(entry);
 }
 
 // ─── Chat History ────────────────────────────────────────────────────────────────
 
-export function saveChatHistory(messages: ChatMessage[]): void {
-  if (!Array.isArray(messages)) return;
-  const sanitized = messages
-    .map(sanitizeChatMessage)
-    .filter((m): m is ChatMessage => m !== null);
-  const trimmed = sanitized.slice(-MAX_CHAT_MESSAGES);
-  safeSet(STORAGE_KEYS.CHAT_HISTORY, trimmed);
-}
-
 export function getChatHistory(): ChatMessage[] {
   const raw = safeGet<unknown[]>(STORAGE_KEYS.CHAT_HISTORY);
   if (!Array.isArray(raw)) return [];
-  return raw.map(sanitizeChatMessage).filter((m): m is ChatMessage => m !== null);
+  return raw
+    .map((m) => sanitizeChatMessage(m))
+    .filter((m): m is ChatMessage => m !== null);
+}
+
+export function saveChatMessage(message: ChatMessage): void {
+  const sanitized = sanitizeChatMessage(message);
+  if (!sanitized) return;
+
+  const history = getChatHistory();
+  history.push(sanitized);
+
+  if (history.length > MAX_CHAT_MESSAGES) {
+    history.splice(0, history.length - MAX_CHAT_MESSAGES);
+  }
+
+  safeSet(STORAGE_KEYS.CHAT_HISTORY, history);
 }
 
 export function clearChatHistory(): void {
-  if (typeof window === "undefined") return;
-  localStorage.removeItem(STORAGE_KEYS.CHAT_HISTORY);
-}
-
-// ─── Streak ───────────────────────────────────────────────────────────────────────
-
-export function getStreak(): number {
-  const val = safeGet<unknown>(STORAGE_KEYS.STREAK);
-  if (typeof val !== "number" || !Number.isFinite(val) || val < 0) return 0;
-  return Math.floor(val);
+  safeSet(STORAGE_KEYS.CHAT_HISTORY, []);
 }
 
 /**
- * Updates the streak:
- * - If last entry was yesterday → increment
- * - If last entry was today → no change (already counted)
- * - If gap > 1 day → reset to 1
- * Returns the new streak count.
+ * Returns a single chat message as a plain serializable record
+ * (useful for export/debug tooling or analytics payloads).
  */
+export function getChatMessageAsRecord(id: string): Record<string, unknown> | null {
+  const message = getChatHistory().find((m) => m.id === id);
+  if (!message) return null;
+  return toRecord(message);
+}
+
+// ─── Streak ──────────────────────────────────────────────────────────────────────
+
+export function getStreak(): number {
+  return safeGet<number>(STORAGE_KEYS.STREAK) ?? 0;
+}
+
 export function updateStreak(): number {
   const today = getTodayDateStr();
   const yesterday = getYesterdayDateStr();
-  const lastDate = safeGet<unknown>(STORAGE_KEYS.LAST_ENTRY_DATE);
-  let streak = getStreak();
+  const lastEntryDate = safeGet<string>(STORAGE_KEYS.LAST_ENTRY_DATE);
+  const currentStreak = getStreak();
 
-  // Validate lastDate before using it
-  const validLastDate =
-    typeof lastDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(lastDate)
-      ? lastDate
-      : null;
-
-  if (validLastDate === today) {
-    return streak;
-  } else if (validLastDate === yesterday) {
-    streak += 1;
+  let streak: number;
+  if (lastEntryDate === today) {
+    return currentStreak;
+  } else if (lastEntryDate === yesterday) {
+    streak = currentStreak + 1;
   } else {
     streak = 1;
   }

@@ -21,6 +21,51 @@ const SECURITY_HEADERS = {
   "Cache-Control": "no-store",
 };
 
+// ─── Rate Limiting ────────────────────────────────────────────────────────────────
+// Simple in-memory sliding-window limiter. Note: this resets on cold starts and
+// is per-instance in serverless environments. For production at scale, swap
+// this for a shared store (e.g. Upstash Redis / Vercel KV).
+const RATE_LIMIT_MAX_REQUESTS = 20;
+const RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute
+const rateLimitMap = new Map<string, { count: number; reset: number }>();
+
+// Periodically clear stale entries so the map doesn't grow unbounded.
+const RATE_LIMIT_CLEANUP_INTERVAL_MS = 5 * 60_000;
+let lastCleanup = Date.now();
+
+function cleanupRateLimitMap(now: number): void {
+  if (now - lastCleanup < RATE_LIMIT_CLEANUP_INTERVAL_MS) return;
+  lastCleanup = now;
+  for (const [key, entry] of rateLimitMap.entries()) {
+    if (now > entry.reset) rateLimitMap.delete(key);
+  }
+}
+
+function getClientIp(req: NextRequest): string {
+  const forwarded = req.headers.get("x-forwarded-for");
+  if (forwarded) {
+    const first = forwarded.split(",")[0]?.trim();
+    if (first) return first;
+  }
+  const realIp = req.headers.get("x-real-ip");
+  if (realIp) return realIp.trim();
+  return "unknown";
+}
+
+function isRateLimited(ip: string): boolean {
+  const now = Date.now();
+  cleanupRateLimitMap(now);
+
+  const entry = rateLimitMap.get(ip);
+  if (!entry || now > entry.reset) {
+    rateLimitMap.set(ip, { count: 1, reset: now + RATE_LIMIT_WINDOW_MS });
+    return false;
+  }
+  if (entry.count >= RATE_LIMIT_MAX_REQUESTS) return true;
+  entry.count += 1;
+  return false;
+}
+
 // ─── Input Sanitizer ─────────────────────────────────────────────────────────────
 
 function sanitizeString(input: unknown, maxLength: number): string {
@@ -157,6 +202,15 @@ function validateTodayEntry(raw: unknown) {
 // ─── Route Handler ───────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
+  // Rate limiting
+  const ip = getClientIp(req);
+  if (isRateLimited(ip)) {
+    return Response.json(
+      { error: "Too many requests. Please slow down and try again shortly." },
+      { status: 429, headers: SECURITY_HEADERS }
+    );
+  }
+
   // Enforce Content-Type
   const contentType = req.headers.get("content-type") ?? "";
   if (!contentType.includes("application/json")) {
@@ -190,8 +244,7 @@ export async function POST(req: NextRequest) {
 
   try {
     const systemPrompt = buildSystemPrompt(userProfile, todayEntry);
-    const filteredMessages = messages.filter((m) => m.role !== "system");
-    const reply = await callAI(filteredMessages, systemPrompt);
+    const reply = await callAI(messages, systemPrompt);
 
     return Response.json({ reply }, { status: 200, headers: SECURITY_HEADERS });
   } catch (error) {
