@@ -15,7 +15,6 @@ import {
   getWeeklyInsight,
   isOnboarded,
   saveWeeklyInsight,
-  seedDemoData,
   shouldRefreshInsight,
 } from "@/lib/storage";
 import type { MoodEntry, UserProfile, WeeklyInsight } from "@/lib/types";
@@ -40,9 +39,6 @@ export default function InsightsPage() {
     const p = getUserProfile()!;
     setProfile(p);
 
-    // Seed demo data if no entries exist
-    seedDemoData();
-
     const last7 = getLast7DaysEntries();
     const all = getMoodEntries();
     const currentStreak = getStreak();
@@ -50,6 +46,13 @@ export default function InsightsPage() {
     setEntries(last7);
     setStreak(currentStreak);
     setTotalEntries(all.length);
+
+    // No entries yet — nothing to summarize. Skip the AI call entirely
+    // and show the empty-state UI instead of fetching/seeding fake data.
+    if (all.length === 0) {
+      setWeeklyInsight(null);
+      return;
+    }
 
     const cachedInsight = getWeeklyInsight();
 
@@ -101,37 +104,64 @@ export default function InsightsPage() {
           </p>
         </div>
 
-        {/* Streak Badge */}
-        <div className="animate-fade-in-up" style={{ animationDelay: "60ms" }}>
-          <StreakBadge streak={streak} />
-        </div>
+        {totalEntries === 0 ? (
+          /* Empty State — no entries yet, encourage first check-in */
+          <div
+            className="animate-fade-in-up flex flex-col items-center text-center gap-3 rounded-2xl p-8 mt-4"
+            style={{ background: "var(--surface)" }}
+          >
+            <div className="text-4xl">🌱</div>
+            <h3
+              className="text-lg font-semibold"
+              style={{ color: "var(--text-primary)" }}
+            >
+              No insights yet
+            </h3>
+            <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+              Complete your first daily check-in and Aarogya will start
+              building a picture of your mood, stress patterns, and the
+              subjects on your mind.
+            </p>
+            <button
+              onClick={() => router.push("/checkin")}
+              className="mt-2 px-5 py-2.5 rounded-xl font-semibold text-sm shadow-sm"
+              style={{ background: "var(--brand-green)", color: "white" }}
+            >
+              Go to Check-In
+            </button>
+          </div>
+        ) : (
+          <>
+            {/* Streak Badge */}
+            <div className="animate-fade-in-up" style={{ animationDelay: "60ms" }}>
+              <StreakBadge streak={streak} />
+            </div>
 
-        {/* Mood Chart */}
-        <div
-          className="animate-fade-in-up"
-          style={{ animationDelay: "120ms" }}
-        >
-          <MoodChart entries={entries} />
-        </div>
+            {/* Mood Chart */}
+            <div
+              className="animate-fade-in-up"
+              style={{ animationDelay: "120ms" }}
+            >
+              <MoodChart entries={entries} />
+            </div>
 
-        {/* Trigger Tags */}
-        <div
-          className="animate-fade-in-up"
-          style={{ animationDelay: "180ms" }}
-        >
-          <TriggerTags triggers={weeklyInsight?.topTriggers ?? []} />
-        </div>
+            {/* Trigger Tags */}
+            <div
+              className="animate-fade-in-up"
+              style={{ animationDelay: "180ms" }}
+            >
+              <TriggerTags triggers={weeklyInsight?.topTriggers ?? []} />
+            </div>
 
-        {/* Weekly Insight Card */}
-        <div
-          className="animate-fade-in-up pb-2"
-          style={{ animationDelay: "240ms" }}
-        >
-          <WeeklyInsightCard
-            insight={weeklyInsight}
-            isLoading={isLoadingInsight}
-          />
-        </div>
+            {/* Weekly Insight Card */}
+            <div className="animate-fade-in-up pb-2" style={{ animationDelay: "240ms" }}>
+              <WeeklyInsightCard
+                insight={weeklyInsight}
+                isLoading={isLoadingInsight}
+              />
+            </div>
+          </>
+        )}
       </div>
 
       <Navbar />

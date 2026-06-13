@@ -203,8 +203,27 @@ export function getTodayEntry(): MoodEntry | null {
   return getMoodEntries().find((e) => e.date === today) ?? null;
 }
 
+export function getTodaysMoodEntry(): MoodEntry | null {
+  return getTodayEntry();
+}
+
 export function hasCheckedInToday(): boolean {
   return getTodayEntry() !== null;
+}
+
+/**
+ * Returns the mood entries from the last 7 days (most recent first if reversed
+ * by the caller). Days with no entry are simply absent — no placeholder data.
+ */
+export function getLast7DaysEntries(): MoodEntry[] {
+  const sevenDaysAgo = new Date();
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6); // includes today => 7 days
+  sevenDaysAgo.setHours(0, 0, 0, 0);
+
+  return getMoodEntries().filter((e) => {
+    const entryDate = new Date(e.date);
+    return entryDate >= sevenDaysAgo;
+  });
 }
 
 /**
@@ -304,71 +323,4 @@ export function shouldRefreshInsight(): boolean {
   const now = Date.now();
   const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
   return now - generated > TWENTY_FOUR_HOURS;
-}
-
-// ─── Demo Data Seeder ────────────────────────────────────────────────────────────
-
-export function seedDemoData(): void {
-  const existing = getMoodEntries();
-  if (existing.length > 0) return;
-
-  const now = new Date();
-  const makeDate = (daysAgo: number) => {
-    const d = new Date(now);
-    d.setDate(d.getDate() - daysAgo);
-    return d.toISOString().split("T")[0];
-  };
-
-  const demoEntries: MoodEntry[] = [
-    {
-      id: "demo_1",
-      date: makeDate(6),
-      mood: 2,
-      stressLevel: 7,
-      journalText:
-        "Organic chemistry is killing me. Can't seem to remember all the reactions.",
-      stressedSubjects: ["Chemistry"],
-      createdAt: new Date(now.getTime() - 6 * 86400000).toISOString(),
-    },
-    {
-      id: "demo_2",
-      date: makeDate(5),
-      mood: 2,
-      stressLevel: 8,
-      journalText: "Mock test went poorly. Physics numericals are so tough.",
-      stressedSubjects: ["Physics", "Chemistry"],
-      createdAt: new Date(now.getTime() - 5 * 86400000).toISOString(),
-    },
-    {
-      id: "demo_3",
-      date: makeDate(4),
-      mood: 3,
-      stressLevel: 5,
-      journalText: "Took a short break. Feeling slightly better after the rest.",
-      stressedSubjects: [],
-      createdAt: new Date(now.getTime() - 4 * 86400000).toISOString(),
-    },
-    {
-      id: "demo_4",
-      date: makeDate(3),
-      mood: 4,
-      stressLevel: 4,
-      journalText: "Finally understood thermodynamics! Revision is going well today.",
-      stressedSubjects: ["Physics"],
-      createdAt: new Date(now.getTime() - 3 * 86400000).toISOString(),
-    },
-    {
-      id: "demo_5",
-      date: makeDate(2),
-      mood: 4,
-      stressLevel: 3,
-      journalText: "Solved 40 MCQs in Biology. Feeling confident about the chapter.",
-      stressedSubjects: [],
-      createdAt: new Date(now.getTime() - 2 * 86400000).toISOString(),
-    },
-  ];
-
-  safeSet(STORAGE_KEYS.MOOD_ENTRIES, demoEntries);
-  safeSet(STORAGE_KEYS.STREAK, 3);
-  safeSet(STORAGE_KEYS.LAST_ENTRY_DATE, makeDate(2));
 }
